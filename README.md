@@ -76,8 +76,6 @@ $ ./git-editor \
 
 You will be prompted to confirm the force-push at the end.
 
----
-
 ## How it Works
 
 1. **Update origin URL**: Sets the `origin` remote to the new URL.
@@ -87,8 +85,6 @@ You will be prompted to confirm the force-push at the end.
 5. **Cleanup**: Removes temporary files and runs `git gc`.
 6. **Force-push**: Optionally pushes the rewritten history to the remote.
 
----
-
 ## Safety Notes
 
 - **This operation rewrites history and is destructive.**
@@ -96,8 +92,6 @@ You will be prompted to confirm the force-push at the end.
 - All branches and tags will be rewritten.
 - You will need to force-push (`--force --all`) to update the remote.
 - Collaborators will need to re-clone or reset their local copies.
-
----
 
 ## License
 
