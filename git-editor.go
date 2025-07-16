@@ -9,7 +9,6 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -152,42 +151,63 @@ func main() {
 		step = et.Sub(st) / time.Duration(n-1)
 	}
 
-	// write mapping
-	mapFile := "commit-date-mapping.txt"
-	var sb strings.Builder
-	for i, h := range commits {
-		dt := st.Add(step * time.Duration(i))
+	// rewrite history using rebase
+	var rebaseScript strings.Builder
+	for i, commitHash := range commits {
+		dt := st
+		if n > 1 {
+			dt = st.Add(step * time.Duration(i))
+		}
 		ds := dt.Format("2006-01-02 15:04:05 +0000")
-		sb.WriteString(fmt.Sprintf("%s %s\n", h, ds))
+
+		rebaseScript.WriteString(fmt.Sprintf("pick %s\n", commitHash))
+		rebaseScript.WriteString(fmt.Sprintf(
+			"exec GIT_COMMITTER_DATE='%s' GIT_AUTHOR_DATE='%s' git commit --amend --no-edit --author='%s <%s>'\n",
+			ds, ds, *authorName, *authorEmail,
+		))
 	}
-	if err := ioutil.WriteFile(mapFile, []byte(sb.String()), 0644); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+
+	// We are rewriting the full history of the current branch, so we use `rebase -i --root`.
+	rebaseCmd := []string{"rebase", "-i", "--root"}
+
+	// Use a temporary file to pass the script to the rebase command.
+	editorScriptFile, err := os.CreateTemp("", "git-editor-*.sh")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "Failed to create temp file for editor script:", err)
+		os.Exit(1)
+	}
+	defer os.Remove(editorScriptFile.Name())
+
+	editorScriptContent := fmt.Sprintf("#!/bin/sh\ncat <<'EOF' > \"$1\"\n%sEOF\n", rebaseScript.String())
+	if _, err := editorScriptFile.WriteString(editorScriptContent); err != nil {
+		fmt.Fprintln(os.Stderr, "Failed to write to editor script:", err)
+		editorScriptFile.Close()
+		os.Exit(1)
+	}
+	if err := editorScriptFile.Close(); err != nil {
+		fmt.Fprintln(os.Stderr, "Failed to close editor script:", err)
 		os.Exit(1)
 	}
 
-	// build env-filter script
-	script := fmt.Sprintf(`while read h d t z; do
-  if [ "$h" = "$GIT_COMMIT" ]; then
-    new_date="$d $t $z"
-    break
-  fi
-done < %s
-export GIT_AUTHOR_DATE="$new_date"
-export GIT_COMMITTER_DATE="$new_date"
-export GIT_AUTHOR_NAME="%s"
-export GIT_AUTHOR_EMAIL="%s"
-export GIT_COMMITTER_NAME="%s"
-export GIT_COMMITTER_EMAIL="%s"`,
-		mapFile,
-		*authorName, *authorEmail,
-		*authorName, *authorEmail,
-	)
+	if err := os.Chmod(editorScriptFile.Name(), 0755); err != nil {
+		fmt.Fprintln(os.Stderr, "Failed to make editor script executable:", err)
+		os.Exit(1)
+	}
 
-	// rewrite history
-	run("git", "filter-branch", "--env-filter", script, "--", "--all")
+	cmd := exec.Command("git", rebaseCmd...)
+	cmd.Env = append(os.Environ(), "GIT_SEQUENCE_EDITOR="+editorScriptFile.Name())
+
+	fmt.Println("Rewriting history...")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error during rebase: %v\n", err)
+		fmt.Fprintln(os.Stderr, string(output))
+		os.Exit(1)
+	}
+
+	fmt.Println("History rewritten successfully.")
 
 	// cleanup
-	os.Remove(mapFile)
 	run("git", "reflog", "expire", "--expire=now", "--all")
 	run("git", "gc", "--prune=now", "--aggressive")
 
