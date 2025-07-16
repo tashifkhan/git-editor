@@ -87,13 +87,26 @@ func main() {
 	if *remoteURL == "" {
 		*remoteURL = prompt("Enter new Git remote URL for origin: ")
 	}
-	if *startTime == "" {
-		*startTime = prompt(
-			"Enter ISO start timestamp (e.g. 2025-01-01T00:00:00): ")
-	}
-	if *endTime == "" {
-		*endTime = prompt(
-			"Enter ISO end timestamp (e.g. 2025-06-30T23:59:59): ")
+
+	editDates := false
+	if *startTime != "" {
+		editDates = true
+		if *endTime == "" {
+			*endTime = time.Now().UTC().Format(time.RFC3339)
+		}
+	} else if *endTime != "" {
+		fmt.Fprintln(os.Stderr, "Error: --start-time must be provided if --end-time is specified.")
+		os.Exit(1)
+	} else {
+		choice := prompt("Do you want to edit the commit dates? [y/N]: ")
+		if strings.HasPrefix(strings.ToLower(choice), "y") {
+			editDates = true
+			*startTime = prompt("Enter ISO start timestamp (e.g. 2025-01-01T00:00:00): ")
+			*endTime = prompt("Enter ISO end timestamp (e.g. 2025-06-30T23:59:59) [optional]: ")
+			if *endTime == "" {
+				*endTime = time.Now().UTC().Format(time.RFC3339)
+			}
+		}
 	}
 
 	absRepo := expandPath(*repoPath)
@@ -138,32 +151,40 @@ func main() {
 	}
 
 	// parse times
-	st := parseTime(*startTime)
-	et := parseTime(*endTime)
-	if et.Before(st) {
-		fmt.Fprintln(os.Stderr, "Error: end-time must come after start-time")
-		os.Exit(1)
-	}
-
-	// compute step
+	var st, et time.Time
 	var step time.Duration
-	if n > 1 {
-		step = et.Sub(st) / time.Duration(n-1)
+	if editDates {
+		st = parseTime(*startTime)
+		et = parseTime(*endTime)
+		if et.Before(st) {
+			fmt.Fprintln(os.Stderr, "Error: end-time must come after start-time")
+			os.Exit(1)
+		}
+
+		// compute step
+		if n > 1 {
+			step = et.Sub(st) / time.Duration(n-1)
+		}
 	}
 
 	// rewrite history using rebase
 	var rebaseScript strings.Builder
 	for i, commitHash := range commits {
-		dt := st
-		if n > 1 {
-			dt = st.Add(step * time.Duration(i))
-		}
-		ds := dt.Format("2006-01-02 15:04:05 +0000")
-
 		rebaseScript.WriteString(fmt.Sprintf("pick %s\n", commitHash))
+
+		dateCmdPart := ""
+		if editDates {
+			dt := st
+			if n > 1 {
+				dt = st.Add(step * time.Duration(i))
+			}
+			ds := dt.Format("2006-01-02 15:04:05 +0000")
+			dateCmdPart = fmt.Sprintf("GIT_COMMITTER_DATE='%s' GIT_AUTHOR_DATE='%s' ", ds, ds)
+		}
+
 		rebaseScript.WriteString(fmt.Sprintf(
-			"exec GIT_COMMITTER_DATE='%s' GIT_AUTHOR_DATE='%s' git commit --amend --no-edit --author='%s <%s>'\n",
-			ds, ds, *authorName, *authorEmail,
+			"exec %sgit commit --amend --no-edit --author='%s <%s>'\n",
+			dateCmdPart, *authorName, *authorEmail,
 		))
 	}
 
