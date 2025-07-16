@@ -55,15 +55,36 @@ def main():
     if not args.remote_url:
         args.remote_url = input("Enter new Git remote URL for origin: ").strip()
 
-    if not args.start_time:
-        args.start_time = input(
-            "Enter ISO start timestamp (e.g. 2025-01-01T00:00:00): "
-        ).strip()
+    edit_dates = False
 
-    if not args.end_time:
-        args.end_time = input(
-            "Enter ISO end timestamp (e.g. 2025-06-30T23:59:59): "
-        ).strip()
+    if args.start_time:
+        edit_dates = True
+        if not args.end_time:
+            args.end_time = datetime.now().isoformat()
+
+    elif args.end_time:
+        print(
+            "Error: --start-time must be provided if --end-time is specified.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    else:
+        choice = input("Do you want to edit the commit dates? [y/N]: ").strip().lower()
+
+        if choice in ("y", "yes"):
+            edit_dates = True
+
+            args.start_time = input(
+                "Enter ISO start timestamp (e.g. 2025-01-01T00:00:00): "
+            ).strip()
+
+            args.end_time = input(
+                "Enter ISO end timestamp (e.g. 2025-06-30T23:59:59) [optional]: "
+            ).strip()
+
+            if not args.end_time:
+                args.end_time = datetime.now().isoformat()
 
     repo = expand_and_abs(args.repo_path)
 
@@ -111,34 +132,39 @@ def main():
         print("No commits to rewrite.", file=sys.stderr)
         sys.exit(1)
 
-    # parse interval
-    try:
-        st = datetime.fromisoformat(args.start_time)
-        et = datetime.fromisoformat(args.end_time)
+    st = et = None
+    step = timedelta()
+    if edit_dates:
+        # parse interval
+        try:
+            st = datetime.fromisoformat(args.start_time)
+            et = datetime.fromisoformat(args.end_time)
 
-    except Exception as e:
-        print(f"Bad timestamp: {e}", file=sys.stderr)
-        sys.exit(1)
+        except Exception as e:
+            print(f"Bad timestamp: {e}", file=sys.stderr)
+            sys.exit(1)
 
-    if et < st:
-        print("Error: end-time must follow start-time.", file=sys.stderr)
-        sys.exit(1)
+        if et < st:
+            print("Error: end-time must follow start-time.", file=sys.stderr)
+            sys.exit(1)
 
-    # compute per-commit step
-    step = (et - st) / (n - 1) if n > 1 else timedelta()
+        # compute per-commit step
+        step = (et - st) / (n - 1) if n > 1 else timedelta()
 
     # rewrite history using rebase
     rebase_script_parts = []
     for i, commit_hash in enumerate(commits):
-        dt = st + step * i if n > 1 else st
-        ds = dt.strftime("%Y-%m-%d %H:%M:%S +0000")
-
-        # get the original commit message to preserve it
-        # pick` command and then amend as no full commit hash, in rebase todo
         rebase_script_parts.append(f"pick {commit_hash}")
+
+        date_cmd_part = ""
+        if edit_dates:
+            if st is not None:
+                dt = st + step * i if n > 1 else st
+                ds = dt.strftime("%Y-%m-%d %H:%M:%S +0000")
+                date_cmd_part = f"GIT_COMMITTER_DATE='{ds}' GIT_AUTHOR_DATE='{ds}' "
+
         rebase_script_parts.append(
-            f"exec GIT_COMMITTER_DATE='{ds}' GIT_AUTHOR_DATE='{ds}' "
-            f"git commit --amend --no-edit --author='{author} <{email}>'"
+            f"exec {date_cmd_part}git commit --amend --no-edit --author='{author} <{email}>'"
         )
     rebase_script = "\n".join(rebase_script_parts) + "\n"
 
