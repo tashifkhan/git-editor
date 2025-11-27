@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -44,6 +45,16 @@ func prompt(msg string) string {
 	return strings.TrimSpace(line)
 }
 
+// cleanInput removes non-printable characters from a string.
+func cleanInput(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= 32 && r != 127 {
+			return r
+		}
+		return -1
+	}, s)
+}
+
 // expandPath handles ~ and returns an absolute path
 func expandPath(p string) string {
 	if strings.HasPrefix(p, "~") {
@@ -63,6 +74,9 @@ func expandPath(p string) string {
 }
 
 func parseTime(s string) time.Time {
+	// Handle 'Z' timezone indicator by replacing with '+00:00'
+	s = strings.Replace(s, "Z", "+00:00", 1)
+
 	if t, err := time.Parse(time.RFC3339, s); err == nil {
 		return t.UTC()
 	}
@@ -75,6 +89,45 @@ func parseTime(s string) time.Time {
 	return t.UTC()
 }
 
+// parseTimezone parses a timezone offset string in ±HH:MM format
+// and returns the offset in seconds and formatted string for git (±HHMM)
+func parseTimezone(tzStr string) (int, string, error) {
+	if len(tzStr) < 6 {
+		return 0, "", fmt.Errorf("timezone must be in format ±HH:MM")
+	}
+
+	if tzStr[0] != '+' && tzStr[0] != '-' {
+		return 0, "", fmt.Errorf("timezone must start with + or -")
+	}
+
+	sign := 1
+	if tzStr[0] == '-' {
+		sign = -1
+	}
+
+	parts := strings.Split(tzStr[1:], ":")
+	if len(parts) != 2 {
+		return 0, "", fmt.Errorf("timezone must include colon separator (±HH:MM)")
+	}
+
+	hours, err := strconv.Atoi(parts[0])
+	if err != nil || hours < 0 || hours > 14 {
+		return 0, "", fmt.Errorf("invalid hour value in timezone")
+	}
+
+	minutes, err := strconv.Atoi(parts[1])
+	if err != nil || minutes < 0 || minutes > 59 {
+		return 0, "", fmt.Errorf("invalid minute value in timezone")
+	}
+
+	offsetSeconds := sign * (hours*3600 + minutes*60)
+
+	// Format for git: +HHMM or -HHMM (no colon)
+	gitFormat := fmt.Sprintf("%s%02d%02d", string(tzStr[0]), hours, minutes)
+
+	return offsetSeconds, gitFormat, nil
+}
+
 func main() {
 	repoPath := flag.String("repo-path", ".", "Path to git repo")
 	remoteURL := flag.String("remote-url", "", "New origin URL")
@@ -82,10 +135,11 @@ func main() {
 	endTime := flag.String("end-time", "", "ISO end timestamp")
 	authorName := flag.String("author-name", "", "New author name")
 	authorEmail := flag.String("author-email", "", "New author email")
+	timezone := flag.String("timezone", "+05:30", "Timezone offset for rewritten commit dates (default: +05:30 for IST). Format: ±HH:MM")
 	flag.Parse()
 
 	if *remoteURL == "" {
-		*remoteURL = prompt("Enter new Git remote URL for origin: ")
+		*remoteURL = cleanInput(prompt("Enter new Git remote URL for origin: "))
 	}
 
 	editDates := false
@@ -101,8 +155,8 @@ func main() {
 		choice := prompt("Do you want to edit the commit dates? [y/N]: ")
 		if strings.HasPrefix(strings.ToLower(choice), "y") {
 			editDates = true
-			*startTime = prompt("Enter ISO start timestamp (e.g. 2025-01-01T00:00:00): ")
-			*endTime = prompt("Enter ISO end timestamp (e.g. 2025-06-30T23:59:59) [optional]: ")
+			*startTime = cleanInput(prompt("Enter ISO start timestamp (e.g. 2025-01-01T00:00:00): "))
+			*endTime = cleanInput(prompt("Enter ISO end timestamp (e.g. 2025-06-30T23:59:59) [optional]: "))
 			if *endTime == "" {
 				*endTime = time.Now().UTC().Format(time.RFC3339)
 			}
@@ -125,13 +179,13 @@ func main() {
 		*authorName = cfg("user.name")
 	}
 	if *authorName == "" {
-		*authorName = prompt("Enter new author name: ")
+		*authorName = cleanInput(prompt("Enter new author name: "))
 	}
 	if *authorEmail == "" {
 		*authorEmail = cfg("user.email")
 	}
 	if *authorEmail == "" {
-		*authorEmail = prompt("Enter new author email: ")
+		*authorEmail = cleanInput(prompt("Enter new author email: "))
 	}
 	if *authorName == "" || *authorEmail == "" {
 		fmt.Fprintln(os.Stderr, "Error: author name/email required")
@@ -161,10 +215,26 @@ func main() {
 			os.Exit(1)
 		}
 
+		if et.Equal(st) && n > 1 {
+			fmt.Fprintln(os.Stderr, "Warning: start-time equals end-time. All commits will have the same timestamp.")
+			response := prompt("Continue anyway? [y/N]: ")
+			if !strings.HasPrefix(strings.ToLower(response), "y") {
+				os.Exit(0)
+			}
+		}
+
 		// compute step
 		if n > 1 {
 			step = et.Sub(st) / time.Duration(n-1)
 		}
+	}
+
+	// parse timezone offset (±HH:MM)
+	tzOffsetSeconds, tzGitFormat, err := parseTimezone(*timezone)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: invalid timezone format '%s': %v\n", *timezone, err)
+		fmt.Fprintln(os.Stderr, "Expected format: ±HH:MM (e.g., +05:30, -07:00)")
+		os.Exit(1)
 	}
 
 	// rewrite history using rebase
@@ -178,7 +248,10 @@ func main() {
 			if n > 1 {
 				dt = st.Add(step * time.Duration(i))
 			}
-			ds := dt.Format("2006-01-02 15:04:05 +0000")
+			// Apply timezone offset to the datetime
+			dtWithTz := dt.Add(time.Duration(tzOffsetSeconds) * time.Second)
+			// Format with the specified timezone
+			ds := dtWithTz.Format("2006-01-02 15:04:05") + " " + tzGitFormat
 			dateCmdPart = fmt.Sprintf("GIT_COMMITTER_DATE='%s' GIT_AUTHOR_DATE='%s' ", ds, ds)
 		}
 
