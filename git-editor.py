@@ -5,8 +5,8 @@ given interval, change author info, and optionally force-push.
 """
 
 import argparse
-import subprocess
 import os
+import subprocess
 import sys
 from datetime import datetime, timedelta
 
@@ -39,6 +39,11 @@ def parse_args():
     parser.add_argument(
         "--author-email",
         help="New author email (default: git config user.email)",
+    )
+    parser.add_argument(
+        "--timezone",
+        default="+05:30",
+        help="Timezone offset for rewritten commit dates (default: +05:30 for IST). Format: ±HH:MM",
     )
     return parser.parse_args()
 
@@ -137,8 +142,11 @@ def main():
     if edit_dates:
         # parse interval
         try:
-            st = datetime.fromisoformat(args.start_time)
-            et = datetime.fromisoformat(args.end_time)
+            # Handle 'Z' timezone indicator by replacing with '+00:00'
+            start_str = args.start_time.replace("Z", "+00:00")
+            end_str = args.end_time.replace("Z", "+00:00")
+            st = datetime.fromisoformat(start_str)
+            et = datetime.fromisoformat(end_str)
 
         except Exception as e:
             print(f"Bad timestamp: {e}", file=sys.stderr)
@@ -148,8 +156,44 @@ def main():
             print("Error: end-time must follow start-time.", file=sys.stderr)
             sys.exit(1)
 
+        if et == st and n > 1:
+            print(
+                "Warning: start-time equals end-time. All commits will have the same timestamp.",
+                file=sys.stderr,
+            )
+            response = input("Continue anyway? [y/N]: ").strip().lower()
+            if response not in ("y", "yes"):
+                sys.exit(0)
+
         # compute per-commit step
         step = (et - st) / (n - 1) if n > 1 else timedelta()
+
+    # parse timezone offset (±HH:MM)
+    try:
+        tz_str = args.timezone
+        if not tz_str.startswith(("+", "-")):
+            raise ValueError("Timezone must start with + or -")
+        sign = 1 if tz_str.startswith("+") else -1
+        time_part = tz_str[1:]
+        if ":" not in time_part:
+            raise ValueError("Timezone must include colon separator")
+        hh, mm = time_part.split(":")
+        tz_offset_hours = int(hh)
+        tz_offset_minutes = int(mm)
+        if (
+            tz_offset_hours < 0
+            or tz_offset_hours > 14
+            or tz_offset_minutes < 0
+            or tz_offset_minutes > 59
+        ):
+            raise ValueError("Invalid hour or minute values")
+        tz_delta = timedelta(hours=tz_offset_hours, minutes=tz_offset_minutes) * sign
+        # Format for git: +HHMM or -HHMM (no colon)
+        tz_git_format = f"{'+' if sign == 1 else '-'}{hh.zfill(2)}{mm.zfill(2)}"
+    except Exception as e:
+        print(f"Error: invalid timezone format '{args.timezone}': {e}", file=sys.stderr)
+        print("Expected format: ±HH:MM (e.g., +05:30, -07:00)", file=sys.stderr)
+        sys.exit(1)
 
     # rewrite history using rebase
     rebase_script_parts = []
@@ -160,7 +204,10 @@ def main():
         if edit_dates:
             if st is not None:
                 dt = st + step * i if n > 1 else st
-                ds = dt.strftime("%Y-%m-%d %H:%M:%S +0000")
+                # Apply timezone offset to the datetime
+                dt_with_tz = dt + tz_delta
+                # Format with the specified timezone
+                ds = dt_with_tz.strftime(f"%Y-%m-%d %H:%M:%S {tz_git_format}")
                 date_cmd_part = f"GIT_COMMITTER_DATE='{ds}' GIT_AUTHOR_DATE='{ds}' "
 
         rebase_script_parts.append(
