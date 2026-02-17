@@ -70,6 +70,15 @@ def escape_shell_single_quote(s: str) -> str:
     return s.replace("'", "'\"'\"'")
 
 
+def git_sequence_editor_command(script_path: str) -> str:
+    """
+    Build a shell-safe command string for GIT_SEQUENCE_EDITOR.
+    Git evaluates this value via sh, so Windows paths must avoid backslashes.
+    """
+    shell_path = script_path.replace("\\", "/") if os.name == "nt" else script_path
+    return f"'{escape_shell_single_quote(shell_path)}'"
+
+
 def ensure_remote(remote_url: str) -> None:
     if subprocess.run(["git", "remote", "get-url", "origin"]).returncode != 0:
         subprocess.run(["git", "remote", "add", "origin", remote_url], check=True)
@@ -278,7 +287,7 @@ def main():
     os.chmod(editor_script_path, 0o755)
 
     env = os.environ.copy()
-    env["GIT_SEQUENCE_EDITOR"] = editor_script_path
+    env["GIT_SEQUENCE_EDITOR"] = git_sequence_editor_command(editor_script_path)
 
     print("Rewriting history...")
     rebase_proc = subprocess.run(

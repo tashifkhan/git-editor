@@ -50,6 +50,15 @@ func escapeShellSingleQuote(s string) string {
 	return strings.ReplaceAll(s, "'", "'\"'\"'")
 }
 
+func gitSequenceEditorCommand(scriptPath string) string {
+	// Git evaluates GIT_SEQUENCE_EDITOR via sh, so Windows paths must avoid backslashes.
+	shellPath := scriptPath
+	if os.PathSeparator == '\\' {
+		shellPath = strings.ReplaceAll(shellPath, "\\", "/")
+	}
+	return "'" + escapeShellSingleQuote(shellPath) + "'"
+}
+
 func ensureRemote(remoteURL string) {
 	if err := exec.Command("git", "remote", "get-url", "origin").Run(); err != nil {
 		run("git", "remote", "add", "origin", remoteURL)
@@ -320,7 +329,7 @@ func main() {
 	}
 
 	cmd := exec.Command("git", rebaseCmd...)
-	cmd.Env = append(os.Environ(), "GIT_SEQUENCE_EDITOR="+editorScriptFile.Name())
+	cmd.Env = append(os.Environ(), "GIT_SEQUENCE_EDITOR="+gitSequenceEditorCommand(editorScriptFile.Name()))
 
 	fmt.Println("Rewriting history...")
 	output, err := cmd.CombinedOutput()
