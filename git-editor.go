@@ -38,6 +38,38 @@ func runOutput(name string, args ...string) string {
 	return string(out)
 }
 
+func gitConfig(key string) string {
+	out, err := exec.Command("git", "config", "--get", key).CombinedOutput()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func escapeShellSingleQuote(s string) string {
+	return strings.ReplaceAll(s, "'", "'\"'\"'")
+}
+
+func ensureRemote(remoteURL string) {
+	if err := exec.Command("git", "remote", "get-url", "origin").Run(); err != nil {
+		run("git", "remote", "add", "origin", remoteURL)
+		return
+	}
+	run("git", "remote", "set-url", "origin", remoteURL)
+}
+
+func ensureCleanWorktree() {
+	out, err := exec.Command("git", "status", "--porcelain").CombinedOutput()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error checking git status: %v\n", err)
+		os.Exit(1)
+	}
+	if strings.TrimSpace(string(out)) != "" {
+		fmt.Fprintln(os.Stderr, "Error: working directory has uncommitted changes. Please commit or stash before rewriting history.")
+		os.Exit(1)
+	}
+}
+
 func prompt(msg string) string {
 	fmt.Print(msg)
 	reader := bufio.NewReader(os.Stdin)
@@ -135,6 +167,7 @@ func main() {
 	endTime := flag.String("end-time", "", "ISO end timestamp")
 	authorName := flag.String("author-name", "", "New author name")
 	authorEmail := flag.String("author-email", "", "New author email")
+	forcePush := flag.Bool("force-push", false, "Force push rewritten history to origin without prompting")
 	timezone := flag.String("timezone", "+05:30", "Timezone offset for rewritten commit dates (default: +05:30 for IST). Format: ±HH:MM")
 	flag.Parse()
 
@@ -169,20 +202,16 @@ func main() {
 		os.Exit(1)
 	}
 	os.Chdir(absRepo)
+	ensureCleanWorktree()
 
-	cfg := func(key string) string {
-		return strings.TrimSpace(
-			runOutput("git", "config", "--get", key),
-		)
-	}
 	if *authorName == "" {
-		*authorName = cfg("user.name")
+		*authorName = gitConfig("user.name")
 	}
 	if *authorName == "" {
 		*authorName = cleanInput(prompt("Enter new author name: "))
 	}
 	if *authorEmail == "" {
-		*authorEmail = cfg("user.email")
+		*authorEmail = gitConfig("user.email")
 	}
 	if *authorEmail == "" {
 		*authorEmail = cleanInput(prompt("Enter new author email: "))
@@ -192,8 +221,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	// update origin URL
-	run("git", "remote", "set-url", "origin", *remoteURL)
+	// update origin URL (create origin if missing)
+	ensureRemote(*remoteURL)
 
 	// list commits
 	revList := runOutput("git", "rev-list", "--reverse", "HEAD")
@@ -238,6 +267,8 @@ func main() {
 	}
 
 	// rewrite history using rebase
+	escapedAuthorName := escapeShellSingleQuote(*authorName)
+	escapedAuthorEmail := escapeShellSingleQuote(*authorEmail)
 	var rebaseScript strings.Builder
 	for i, commitHash := range commits {
 		rebaseScript.WriteString(fmt.Sprintf("pick %s\n", commitHash))
@@ -257,7 +288,7 @@ func main() {
 
 		rebaseScript.WriteString(fmt.Sprintf(
 			"exec GIT_COMMITTER_NAME='%s' GIT_COMMITTER_EMAIL='%s' %sgit commit --amend --no-edit --author='%s <%s>'\n",
-			*authorName, *authorEmail, dateCmdPart, *authorName, *authorEmail,
+			escapedAuthorName, escapedAuthorEmail, dateCmdPart, escapedAuthorName, escapedAuthorEmail,
 		))
 	}
 
@@ -306,8 +337,13 @@ func main() {
 	run("git", "gc", "--prune=now", "--aggressive")
 
 	// optionally push
-	choice := prompt("Do you want to push to origin now? [y/N]: ")
 	pushCmd := []string{"git", "push", "-u", "origin", "--force", "--all"}
+	if *forcePush {
+		run(pushCmd[0], pushCmd[1:]...)
+		fmt.Println("\n\nHistory rewritten and force-pushed.")
+		return
+	}
+	choice := prompt("Do you want to push to origin now? [y/N]: ")
 	if strings.HasPrefix(strings.ToLower(choice), "y") {
 		run(pushCmd[0], pushCmd[1:]...)
 		fmt.Println("\n\nHistory rewritten and force-pushed.")

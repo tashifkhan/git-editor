@@ -42,6 +42,11 @@ def parse_args():
         help="New author email (default: git config user.email)",
     )
     parser.add_argument(
+        "--force-push",
+        action="store_true",
+        help="Force push rewritten history to origin without prompting",
+    )
+    parser.add_argument(
         "--timezone",
         default="+05:30",
         help="Timezone offset for rewritten commit dates (default: +05:30 for IST). Format: ±HH:MM",
@@ -52,6 +57,42 @@ def parse_args():
 def clean_input(s: str) -> str:
     """Remove non-printable characters from a string."""
     return "".join(ch for ch in s if ch >= " " and ch != "\x7f")
+
+
+def git_config(key: str) -> str:
+    r = subprocess.run(
+        ["git", "config", "--get", key], stdout=subprocess.PIPE, text=True
+    )
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def escape_shell_single_quote(s: str) -> str:
+    return s.replace("'", "'\"'\"'")
+
+
+def ensure_remote(remote_url: str) -> None:
+    if subprocess.run(["git", "remote", "get-url", "origin"]).returncode != 0:
+        subprocess.run(["git", "remote", "add", "origin", remote_url], check=True)
+    else:
+        subprocess.run(["git", "remote", "set-url", "origin", remote_url], check=True)
+
+
+def ensure_clean_worktree() -> None:
+    r = subprocess.run(
+        ["git", "status", "--porcelain"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if r.returncode != 0:
+        print(f"Error checking git status: {r.stderr}", file=sys.stderr)
+        sys.exit(1)
+    if r.stdout.strip():
+        print(
+            "Error: working directory has uncommitted changes. Please commit or stash before rewriting history.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 def expand_and_abs(path: str) -> str:
@@ -108,19 +149,14 @@ def main():
         sys.exit(1)
 
     os.chdir(repo)
+    ensure_clean_worktree()
 
-    def git_cfg(key):
-        r = subprocess.run(
-            ["git", "config", "--get", key], stdout=subprocess.PIPE, text=True
-        )
-        return r.stdout.strip()
-
-    author = args.author_name or git_cfg("user.name")
+    author = args.author_name or git_config("user.name")
 
     if not author:
         author = clean_input(input("Enter new author name: ").strip())
 
-    email = args.author_email or git_cfg("user.email")
+    email = args.author_email or git_config("user.email")
 
     if not email:
         email = clean_input(input("Enter new author email: ").strip())
@@ -129,7 +165,7 @@ def main():
         print("Error: author name and email must be provided.", file=sys.stderr)
         sys.exit(1)
 
-    subprocess.run(["git", "remote", "set-url", "origin", args.remote_url], check=True)
+    ensure_remote(args.remote_url)
 
     # list all commits oldest→newest
     rev = subprocess.run(
@@ -206,6 +242,8 @@ def main():
         sys.exit(1)
 
     # rewrite history using rebase
+    escaped_author = escape_shell_single_quote(author)
+    escaped_email = escape_shell_single_quote(email)
     rebase_script_parts = []
     for i, commit_hash in enumerate(commits):
         rebase_script_parts.append(f"pick {commit_hash}")
@@ -221,7 +259,7 @@ def main():
                 date_cmd_part = f"GIT_COMMITTER_DATE='{ds}' GIT_AUTHOR_DATE='{ds}' "
 
         rebase_script_parts.append(
-            f"exec GIT_COMMITTER_NAME='{author}' GIT_COMMITTER_EMAIL='{email}' {date_cmd_part}git commit --amend --no-edit --author='{author} <{email}>'"
+            f"exec GIT_COMMITTER_NAME='{escaped_author}' GIT_COMMITTER_EMAIL='{escaped_email}' {date_cmd_part}git commit --amend --no-edit --author='{escaped_author} <{escaped_email}>'"
         )
     rebase_script = "\n".join(rebase_script_parts) + "\n"
 
@@ -264,15 +302,17 @@ def main():
     subprocess.run(["git", "reflog", "expire", "--expire=now", "--all"], check=True)
     subprocess.run(["git", "gc", "--prune=now", "--aggressive"], check=True)
 
+    push_cmd = ["git", "push", "-u", "origin", "--force", "--all"]
+    if args.force_push:
+        subprocess.run(push_cmd, check=True)
+        print("\n\nHistory rewritten and force-pushed.")
+        return
+
     # force-push
     choice = input("Do you want to push to origin now? [y/N]: ").strip().lower()
-
-    push_cmd = ["git", "push", "-u", "origin", "--force", "--all"]
-
     if choice in ("y", "yes"):
         subprocess.run(push_cmd, check=True)
         print("\n\nHistory rewritten and force-pushed.")
-
     else:
         print("\n\nHistory rewritten—skipping push.")
         print("To push manually, run:")

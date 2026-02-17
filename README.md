@@ -29,7 +29,7 @@ Both scripts perform identical operations and have the same command-line interfa
 
 - For `git-editor.go`: Go 1.18+ (or compatible)
 - For `git-editor.py`: Python 3.7+
-- A clean working directory (no uncommitted changes)
+- A clean working directory (no uncommitted changes) — the tool enforces this
 - A backup of your repository (rewriting history is destructive!)
 
 ### 1. Build or use the script
@@ -62,8 +62,9 @@ $ python3 git-editor.py [flags]
 | --author-name  | New author name                                         |
 | --author-email | New author email                                        |
 | --timezone     | Timezone offset (default: +05:30 IST). Format: ±HH:MM   |
+| --force-push   | Force push rewritten history to origin without prompt  |
 
-If any flag is omitted, you will be prompted interactively.
+If any flag is omitted, you will be prompted interactively (unless --force-push is set).
 
 ### 3. Examples
 
@@ -114,7 +115,7 @@ $ python3 git-editor.py \
     --author-email "bob@example.com"
 ```
 
-You will be prompted to confirm the force-push at the end.
+You will be prompted to confirm the force-push at the end unless --force-push is set.
 
 > **Note:** For more detailed examples including working hours, timezone references, and troubleshooting, see [EXAMPLES.md](EXAMPLES.md).
 
