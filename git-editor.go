@@ -266,15 +266,19 @@ func main() {
 		os.Exit(1)
 	}
 
-	// rewrite history using rebase
+	// rewrite history while preserving merge topology
 	escapedAuthorName := escapeShellSingleQuote(*authorName)
 	escapedAuthorEmail := escapeShellSingleQuote(*authorEmail)
-	var rebaseScript strings.Builder
-	for i, commitHash := range commits {
-		rebaseScript.WriteString(fmt.Sprintf("pick %s\n", commitHash))
+	var envFilterScript strings.Builder
+	envFilterScript.WriteString(fmt.Sprintf("GIT_AUTHOR_NAME='%s'\n", escapedAuthorName))
+	envFilterScript.WriteString(fmt.Sprintf("GIT_AUTHOR_EMAIL='%s'\n", escapedAuthorEmail))
+	envFilterScript.WriteString(fmt.Sprintf("GIT_COMMITTER_NAME='%s'\n", escapedAuthorName))
+	envFilterScript.WriteString(fmt.Sprintf("GIT_COMMITTER_EMAIL='%s'\n", escapedAuthorEmail))
+	envFilterScript.WriteString("export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL\n")
 
-		dateCmdPart := ""
-		if editDates {
+	if editDates {
+		envFilterScript.WriteString("case \"$GIT_COMMIT\" in\n")
+		for i, commitHash := range commits {
 			dt := st
 			if n > 1 {
 				dt = st.Add(step * time.Duration(i))
@@ -283,54 +287,34 @@ func main() {
 			dtWithTz := dt.Add(time.Duration(tzOffsetSeconds) * time.Second)
 			// Format with the specified timezone
 			ds := dtWithTz.Format("2006-01-02 15:04:05") + " " + tzGitFormat
-			dateCmdPart = fmt.Sprintf("GIT_COMMITTER_DATE='%s' GIT_AUTHOR_DATE='%s' ", ds, ds)
+			escapedDate := escapeShellSingleQuote(ds)
+			envFilterScript.WriteString(fmt.Sprintf("  %s)\n", commitHash))
+			envFilterScript.WriteString(fmt.Sprintf("    GIT_AUTHOR_DATE='%s'\n", escapedDate))
+			envFilterScript.WriteString(fmt.Sprintf("    GIT_COMMITTER_DATE='%s'\n", escapedDate))
+			envFilterScript.WriteString("    export GIT_AUTHOR_DATE GIT_COMMITTER_DATE\n")
+			envFilterScript.WriteString("    ;;\n")
 		}
-
-		rebaseScript.WriteString(fmt.Sprintf(
-			"exec GIT_COMMITTER_NAME='%s' GIT_COMMITTER_EMAIL='%s' %sgit commit --amend --no-edit --author='%s <%s>'\n",
-			escapedAuthorName, escapedAuthorEmail, dateCmdPart, escapedAuthorName, escapedAuthorEmail,
-		))
+		envFilterScript.WriteString("esac\n")
 	}
 
-	// We are rewriting the full history of the current branch, so we use `rebase -i --root`.
-	rebaseCmd := []string{"rebase", "-i", "--root"}
-
-	// Use a temporary file to pass the script to the rebase command.
-	editorScriptFile, err := os.CreateTemp("", "git-editor-*.sh")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "Failed to create temp file for editor script:", err)
-		os.Exit(1)
-	}
-	defer os.Remove(editorScriptFile.Name())
-
-	editorScriptContent := fmt.Sprintf("#!/bin/sh\ncat <<'EOF' > \"$1\"\n%sEOF\n", rebaseScript.String())
-	if _, err := editorScriptFile.WriteString(editorScriptContent); err != nil {
-		fmt.Fprintln(os.Stderr, "Failed to write to editor script:", err)
-		editorScriptFile.Close()
-		os.Exit(1)
-	}
-	if err := editorScriptFile.Close(); err != nil {
-		fmt.Fprintln(os.Stderr, "Failed to close editor script:", err)
-		os.Exit(1)
-	}
-
-	if err := os.Chmod(editorScriptFile.Name(), 0755); err != nil {
-		fmt.Fprintln(os.Stderr, "Failed to make editor script executable:", err)
-		os.Exit(1)
-	}
-
-	cmd := exec.Command("git", rebaseCmd...)
-	cmd.Env = append(os.Environ(), "GIT_SEQUENCE_EDITOR="+editorScriptFile.Name())
-
+	cmd := exec.Command("git", "filter-branch", "-f", "--env-filter", envFilterScript.String(), "--", "--all")
 	fmt.Println("Rewriting history...")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error during rebase: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error during history rewrite: %v\n", err)
 		fmt.Fprintln(os.Stderr, string(output))
 		os.Exit(1)
 	}
+	if strings.TrimSpace(string(output)) != "" {
+		fmt.Println(string(output))
+	}
 
 	fmt.Println("History rewritten successfully.")
+	// cleanup refs created by filter-branch so aggressive gc can prune old objects.
+	refsOutput := runOutput("git", "for-each-ref", "--format=%(refname)", "refs/original/")
+	for _, ref := range strings.Fields(refsOutput) {
+		run("git", "update-ref", "-d", ref)
+	}
 
 	// cleanup
 	run("git", "reflog", "expire", "--expire=now", "--all")
