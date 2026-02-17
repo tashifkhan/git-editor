@@ -256,8 +256,8 @@ func main() {
 		}
 
 		rebaseScript.WriteString(fmt.Sprintf(
-			"exec %sgit commit --amend --no-edit --author='%s <%s>'\n",
-			dateCmdPart, *authorName, *authorEmail,
+			"exec GIT_COMMITTER_NAME='%s' GIT_COMMITTER_EMAIL='%s' %sgit commit --amend --no-edit --author='%s <%s>'\n",
+			*authorName, *authorEmail, dateCmdPart, *authorName, *authorEmail,
 		))
 	}
 

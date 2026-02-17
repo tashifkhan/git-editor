@@ -61,7 +61,7 @@ $ python3 git-editor.py [flags]
 | --end-time     | ISO end timestamp (e.g. 2025-06-30T23:59:59)            |
 | --author-name  | New author name                                         |
 | --author-email | New author email                                        |
-| --timezone     | Timezone offset (default: +05:30 IST). Format: ±HH:MM  |
+| --timezone     | Timezone offset (default: +05:30 IST). Format: ±HH:MM   |
 
 If any flag is omitted, you will be prompted interactively.
 

@@ -8,6 +8,7 @@ import argparse
 import os
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timedelta
 
 
@@ -48,6 +49,11 @@ def parse_args():
     return parser.parse_args()
 
 
+def clean_input(s: str) -> str:
+    """Remove non-printable characters from a string."""
+    return "".join(ch for ch in s if ch >= " " and ch != "\x7f")
+
+
 def expand_and_abs(path: str) -> str:
     """Expand ~ and resolve relative to absolute"""
     path = os.path.expanduser(path)
@@ -58,7 +64,9 @@ def main():
     args = parse_args()
 
     if not args.remote_url:
-        args.remote_url = input("Enter new Git remote URL for origin: ").strip()
+        args.remote_url = clean_input(
+            input("Enter new Git remote URL for origin: ").strip()
+        )
 
     edit_dates = False
 
@@ -80,13 +88,15 @@ def main():
         if choice in ("y", "yes"):
             edit_dates = True
 
-            args.start_time = input(
-                "Enter ISO start timestamp (e.g. 2025-01-01T00:00:00): "
-            ).strip()
+            args.start_time = clean_input(
+                input("Enter ISO start timestamp (e.g. 2025-01-01T00:00:00): ").strip()
+            )
 
-            args.end_time = input(
-                "Enter ISO end timestamp (e.g. 2025-06-30T23:59:59) [optional]: "
-            ).strip()
+            args.end_time = clean_input(
+                input(
+                    "Enter ISO end timestamp (e.g. 2025-06-30T23:59:59) [optional]: "
+                ).strip()
+            )
 
             if not args.end_time:
                 args.end_time = datetime.now().isoformat()
@@ -108,12 +118,12 @@ def main():
     author = args.author_name or git_cfg("user.name")
 
     if not author:
-        author = input("Enter new author name: ").strip()
+        author = clean_input(input("Enter new author name: ").strip())
 
     email = args.author_email or git_cfg("user.email")
 
     if not email:
-        email = input("Enter new author email: ").strip()
+        email = clean_input(input("Enter new author email: ").strip())
 
     if not author or not email:
         print("Error: author name and email must be provided.", file=sys.stderr)
@@ -211,7 +221,7 @@ def main():
                 date_cmd_part = f"GIT_COMMITTER_DATE='{ds}' GIT_AUTHOR_DATE='{ds}' "
 
         rebase_script_parts.append(
-            f"exec {date_cmd_part}git commit --amend --no-edit --author='{author} <{email}>'"
+            f"exec GIT_COMMITTER_NAME='{author}' GIT_COMMITTER_EMAIL='{email}' {date_cmd_part}git commit --amend --no-edit --author='{author} <{email}>'"
         )
     rebase_script = "\n".join(rebase_script_parts) + "\n"
 
@@ -219,8 +229,6 @@ def main():
     rebase_cmd = ["git", "rebase", "-i", "--root"]
 
     # using tempo file to pass the script to the rebase command
-    import tempfile
-
     editor_script_content = f"#!/bin/sh\ncat <<'EOF' > \"$1\"\n{rebase_script}EOF\n"
 
     with tempfile.NamedTemporaryFile(
