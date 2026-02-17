@@ -8,7 +8,6 @@ import argparse
 import os
 import subprocess
 import sys
-import tempfile
 from datetime import datetime, timedelta
 
 
@@ -68,15 +67,6 @@ def git_config(key: str) -> str:
 
 def escape_shell_single_quote(s: str) -> str:
     return s.replace("'", "'\"'\"'")
-
-
-def git_sequence_editor_command(script_path: str) -> str:
-    """
-    Build a shell-safe command string for GIT_SEQUENCE_EDITOR.
-    Git evaluates this value via sh, so Windows paths must avoid backslashes.
-    """
-    shell_path = script_path.replace("\\", "/") if os.name == "nt" else script_path
-    return f"'{escape_shell_single_quote(shell_path)}'"
 
 
 def ensure_remote(remote_url: str) -> None:
@@ -250,62 +240,68 @@ def main():
         print("Expected format: ±HH:MM (e.g., +05:30, -07:00)", file=sys.stderr)
         sys.exit(1)
 
-    # rewrite history using rebase
+    # rewrite history while preserving merge topology
     escaped_author = escape_shell_single_quote(author)
     escaped_email = escape_shell_single_quote(email)
-    rebase_script_parts = []
-    for i, commit_hash in enumerate(commits):
-        rebase_script_parts.append(f"pick {commit_hash}")
+    env_filter_parts = [
+        f"GIT_AUTHOR_NAME='{escaped_author}'",
+        f"GIT_AUTHOR_EMAIL='{escaped_email}'",
+        f"GIT_COMMITTER_NAME='{escaped_author}'",
+        f"GIT_COMMITTER_EMAIL='{escaped_email}'",
+        "export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL",
+    ]
 
-        date_cmd_part = ""
-        if edit_dates:
+    if edit_dates:
+        env_filter_parts.append('case "$GIT_COMMIT" in')
+        for i, commit_hash in enumerate(commits):
+            ds = ""
             if st is not None:
                 dt = st + step * i if n > 1 else st
                 # Apply timezone offset to the datetime
                 dt_with_tz = dt + tz_delta
                 # Format with the specified timezone
                 ds = dt_with_tz.strftime(f"%Y-%m-%d %H:%M:%S {tz_git_format}")
-                date_cmd_part = f"GIT_COMMITTER_DATE='{ds}' GIT_AUTHOR_DATE='{ds}' "
 
-        rebase_script_parts.append(
-            f"exec GIT_COMMITTER_NAME='{escaped_author}' GIT_COMMITTER_EMAIL='{escaped_email}' {date_cmd_part}git commit --amend --no-edit --author='{escaped_author} <{escaped_email}>'"
-        )
-    rebase_script = "\n".join(rebase_script_parts) + "\n"
+            escaped_ds = escape_shell_single_quote(ds)
+            env_filter_parts.append(f"  {commit_hash})")
+            env_filter_parts.append(f"    GIT_AUTHOR_DATE='{escaped_ds}'")
+            env_filter_parts.append(f"    GIT_COMMITTER_DATE='{escaped_ds}'")
+            env_filter_parts.append("    export GIT_AUTHOR_DATE GIT_COMMITTER_DATE")
+            env_filter_parts.append("    ;;")
+        env_filter_parts.append("esac")
 
-    # rewriting the full history of the current branch by using `rebase -i --root`
-    rebase_cmd = ["git", "rebase", "-i", "--root"]
+    env_filter_script = "\n".join(env_filter_parts) + "\n"
 
-    # using tempo file to pass the script to the rebase command
-    editor_script_content = f"#!/bin/sh\ncat <<'EOF' > \"$1\"\n{rebase_script}EOF\n"
-
-    with tempfile.NamedTemporaryFile(
-        mode="w", delete=False, suffix=".sh"
-    ) as editor_script_file:
-        editor_script_file.write(editor_script_content)
-        editor_script_path = editor_script_file.name
-
-    os.chmod(editor_script_path, 0o755)
-
-    env = os.environ.copy()
-    env["GIT_SEQUENCE_EDITOR"] = git_sequence_editor_command(editor_script_path)
+    rewrite_cmd = ["git", "filter-branch", "-f", "--env-filter", env_filter_script, "--", "--all"]
 
     print("Rewriting history...")
-    rebase_proc = subprocess.run(
-        rebase_cmd,
-        env=env,
+    rewrite_proc = subprocess.run(
+        rewrite_cmd,
         capture_output=True,
         text=True,
     )
 
-    os.remove(editor_script_path)
-
-    if rebase_proc.returncode != 0:
-        print("Error during rebase:", file=sys.stderr)
-        print(rebase_proc.stdout, file=sys.stderr)
-        print(rebase_proc.stderr, file=sys.stderr)
+    if rewrite_proc.returncode != 0:
+        print("Error during history rewrite:", file=sys.stderr)
+        print(rewrite_proc.stdout, file=sys.stderr)
+        print(rewrite_proc.stderr, file=sys.stderr)
         sys.exit(1)
 
+    if rewrite_proc.stdout.strip():
+        print(rewrite_proc.stdout)
+    if rewrite_proc.stderr.strip():
+        print(rewrite_proc.stderr)
+
     print("History rewritten successfully.")
+    # cleanup refs created by filter-branch so aggressive gc can prune old objects.
+    refs = subprocess.run(
+        ["git", "for-each-ref", "--format=%(refname)", "refs/original/"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    for ref in refs.stdout.strip().splitlines():
+        subprocess.run(["git", "update-ref", "-d", ref], check=True)
 
     # cleanup
     subprocess.run(["git", "reflog", "expire", "--expire=now", "--all"], check=True)
@@ -326,6 +322,8 @@ def main():
         print("\n\nHistory rewritten—skipping push.")
         print("To push manually, run:")
         print("  " + " ".join(push_cmd))
+
+    return
 
 
 if __name__ == "__main__":
